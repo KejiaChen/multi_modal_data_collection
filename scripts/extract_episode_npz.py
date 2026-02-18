@@ -128,6 +128,34 @@ def save_csv(path, header, array):
         else:
             writer.writerows(array)
 
+def ensure_image_array(img):
+    """Return HxWxC uint8 ndarray, or None if cannot decode."""
+    if isinstance(img, np.ndarray) and img.dtype == object:
+        try:
+            img = img.item()
+        except Exception:
+            try:
+                img = np.array(img.tolist())
+            except Exception:
+                return None
+
+
+    if isinstance(img, (bytes, bytearray, memoryview)):
+        buf = np.frombuffer(img, dtype=np.uint8)
+        decoded = cv2.imdecode(buf, cv2.IMREAD_COLOR)  # BGR
+        return decoded  # BGR uint8
+
+
+    if isinstance(img, np.ndarray):
+
+        if img.ndim == 1 and img.dtype == np.uint8:
+            decoded = cv2.imdecode(img, cv2.IMREAD_COLOR)  # BGR
+            return decoded
+
+        if img.ndim == 3:
+            return img.astype(np.uint8)
+
+    return None
 
 def extract_episode(npz_path):
     if not os.path.exists(npz_path):
@@ -200,7 +228,29 @@ def extract_episode(npz_path):
             up
         )
         print(f"📍 Saved ultimate poses -> {up_csv_path} ({len(up)} entries)")
+        
+    # ============================================================
+    # 2c) Save Manus palm poses (same format as tracker pose)
+    # ============================================================
+    if "manus_right_palm_pose" in data:
+        rp = data["manus_right_palm_pose"]
+        rp_csv_path = os.path.join(out_root, "manus_right_palm_pose.csv")
+        save_csv(
+            rp_csv_path,
+            ["px", "py", "pz", "qx", "qy", "qz", "qw"],
+            rp
+        )
+        print(f"🖐 Saved right palm pose -> {rp_csv_path} ({len(rp)} entries)")
 
+    if "manus_left_palm_pose" in data:
+        lp = data["manus_left_palm_pose"]
+        lp_csv_path = os.path.join(out_root, "manus_left_palm_pose.csv")
+        save_csv(
+            lp_csv_path,
+            ["px", "py", "pz", "qx", "qy", "qz", "qw"],
+            lp
+        )
+        print(f"🖐 Saved left palm pose -> {lp_csv_path} ({len(lp)} entries)")
 
     # ============================================================
     # 3) Extract and save RGB images
@@ -211,17 +261,17 @@ def extract_episode(npz_path):
         os.makedirs(rgb_dir, exist_ok=True)
 
         for i, img in enumerate(rgb_frames):
-            if img.dtype == object:
-                try:
-                    img = img.item()
-                except:
-                    img = np.array(img.tolist(), dtype=np.uint8)
+            arr = ensure_image_array(img)
+            if arr is None:
+                print(f"⚠️ Skip rgb frame {i}: unsupported type {type(img)}")
+                continue
 
-            img_uint8 = img.astype(np.uint8)
-            cv2.imwrite(
-                os.path.join(rgb_dir, f"rgb_{i:04d}.jpg"),
-                cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR)
-            )
+            if isinstance(img, np.ndarray) and img.ndim == 3:
+                out = cv2.cvtColor(arr, cv2.COLOR_RGB2BGR)  
+            else:
+                out = arr  
+
+            cv2.imwrite(os.path.join(rgb_dir, f"rgb_{i:04d}.jpg"), out)
 
         print(f"📸 Saved {len(rgb_frames)} RGB frames -> {rgb_dir}")
 
@@ -251,26 +301,26 @@ def extract_episode(npz_path):
     # ============================================================
     # 5) Manus Glove Data (ERGONOMICS + NODE POSES)
     # ============================================================
-        ERGONOMICS_TYPES = [
-        "ThumbMCPSpread",
-        "ThumbMCPStretch",
-        "ThumbPIPStretch",
-        "ThumbDIPStretch",
-        "IndexMCPStretch",
-        "IndexPIPStretch",
-        "IndexDIPStretch",
-        "MiddleSpread",
-        "MiddleMCPStretch",
-        "MiddlePIPStretch",
-        "MiddleDIPStretch",
-        "RingSpread",
-        "RingMCPStretch",
-        "RingPIPStretch",
-        "RingDIPStretch",
-        "PinkySpread",
-        "PinkyMCPStretch",
-        "PinkyPIPStretch",
-        "PinkyDIPStretch"
+    ERGONOMICS_TYPES = [
+    "ThumbMCPSpread",
+    "ThumbMCPStretch",
+    "ThumbPIPStretch",
+    "ThumbDIPStretch",
+    "IndexMCPStretch",
+    "IndexPIPStretch",
+    "IndexDIPStretch",
+    "MiddleSpread",
+    "MiddleMCPStretch",
+    "MiddlePIPStretch",
+    "MiddleDIPStretch",
+    "RingSpread",
+    "RingMCPStretch",
+    "RingPIPStretch",
+    "RingDIPStretch",
+    "PinkySpread",
+    "PinkyMCPStretch",
+    "PinkyPIPStretch",
+    "PinkyDIPStretch"
     ]
 
     # ----------- Right hand ergonomics -----------
