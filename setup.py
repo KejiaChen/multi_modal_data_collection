@@ -14,7 +14,7 @@ setup(
         ('share/' + package_name, ['package.xml']),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
-    
+
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='tailai.cheng',
@@ -24,10 +24,11 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-    'multi_sensor_data_recording = multi_modal_data_collection.multi_sensor_data_recording:main',
-    'multi_sensor_data_collection = multi_modal_data_collection.multi_sensor_data_collection:main',
-    'button_trigger_node = multi_modal_data_collection.button_trigger_node:main',
-    'multi_sensor_data_collection_with_timestamps = multi_modal_data_collection.multi_sensor_data_collection_with_timestamps:main',
+            'multi_sensor_data_recording = multi_modal_data_collection.multi_sensor_data_recording:main',
+            'multi_sensor_data_collection = multi_modal_data_collection.multi_sensor_data_collection:main',
+            'button_trigger_node = multi_modal_data_collection.button_trigger_node:main',
+            'footswitch_trigger_node = multi_modal_data_collection.footswitch_trigger_node:main',
+            'multi_sensor_data_collection_with_timestamps = multi_modal_data_collection.multi_sensor_data_collection_with_timestamps:main',
         ],
     },
 )
