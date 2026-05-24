@@ -21,14 +21,15 @@ import zipfile
 import numpy as np
 import cv2
 import collections
+import traceback
 
 import rclpy
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped
+from std_msgs.msg import Float64MultiArray
 from cv_bridge import CvBridge
-from manus_ros2_msgs.msg import ManusGlove
 
 
 # ========== Utility functions ==========
@@ -86,14 +87,31 @@ class RecorderWorker:
 
 # ========== Dedicated Recorder ==========
 
+
+def maybe_resize_image(image, width=0, height=0):
+    """Resize an image if both target dimensions are positive."""
+    width = int(width)
+    height = int(height)
+    if width <= 0 or height <= 0:
+        return image
+
+    interpolation = cv2.INTER_AREA
+    if width > image.shape[1] or height > image.shape[0]:
+        interpolation = cv2.INTER_LINEAR
+    return cv2.resize(image, (width, height), interpolation=interpolation)
+
+
 class RealSenseRGBRecorder(RecorderWorker):
     """RealSense RGB image recorder."""
-    def __init__(self, node, topic='/camera_up/color/image_rect_raw'):
+    def __init__(self, node, topic='/camera_up/color/image_rect_raw', resize_width=0, resize_height=0):
         bridge = CvBridge()
+        resize_width = int(resize_width)
+        resize_height = int(resize_height)
 
         def parse_fn(msg: Image):
             img_bgr = bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
-            return cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            return maybe_resize_image(rgb, resize_width, resize_height)
 
         super().__init__(node, topic, Image, parse_fn, name='RealSenseRGB')
         
@@ -128,36 +146,15 @@ class ViveUltimateTrackerRecorder(RecorderWorker):
 
         super().__init__(node, topic, PoseStamped, parse_fn, name='ViveUltimateTracker')
 
-class ManusErgoRecorder(RecorderWorker):
-    """Recorder for Manus glove ergonomics (20 joint values)."""
+
+class Float64ArrayRecorder(RecorderWorker):
+    """Recorder for Float64MultiArray topics such as 4x4 robot transforms."""
 
     def __init__(self, node, topic, name):
-        def parse_fn(msg: ManusGlove):
+        def parse_fn(msg: Float64MultiArray):
+            return np.array(msg.data, dtype=np.float64)
 
-            # 20 joint values of ergonomics
-            ergo_vals = [e.value for e in msg.ergonomics]
-
-            return np.array(ergo_vals, dtype=np.float32)
-
-        super().__init__(node, topic, ManusGlove, parse_fn, name=name)
-
-class ManusNodesRecorder(RecorderWorker):
-    """Recorder for Manus glove raw node poses (25 × 7)."""
-
-    def __init__(self, node, topic, name):
-        def parse_fn(msg: ManusGlove):
-
-            nodes = []
-            # 25 nodes of the glove, each with position (x,y,z) and orientation (x,y,z,w)
-            for n in msg.raw_nodes:
-                p = n.pose.position
-                q = n.pose.orientation
-                nodes.append([p.x, p.y, p.z, q.x, q.y, q.z, q.w])
-
-            return np.array(nodes, dtype=np.float32)
-
-        super().__init__(node, topic, ManusGlove, parse_fn, name=name)
-
+        super().__init__(node, topic, Float64MultiArray, parse_fn, name=name)
 class LucidRGBRecorder(RecorderWorker):
     """LUCID RGB image recorder (Bayer BGGR → RGB)."""
 
@@ -244,42 +241,25 @@ class Aggregator:
             sample["ultimate_pose"] = data_u
             sample["ultimate_pose_t"] = float(t_u)
 
+        if "franka_ee_pose" in picks:
+            t_franka_pose, data_franka_pose = picks["franka_ee_pose"]
+            sample["franka_ee_pose"] = data_franka_pose
+            sample["franka_ee_pose_t"] = float(t_franka_pose)
+
+        if "franka_ee_pose_cmd" in picks:
+            t_franka_pose_cmd, data_franka_pose_cmd = picks["franka_ee_pose_cmd"]
+            sample["franka_ee_pose_cmd"] = data_franka_pose_cmd
+            sample["franka_ee_pose_cmd_t"] = float(t_franka_pose_cmd)
 
         if "tactile_sensor" in picks:
             t_tact, data_tact = picks["tactile_sensor"]
             sample["tactile"] = data_tact
             sample["tactile_t"] = float(t_tact)
-
-        # Manus glove data
-        if "manus_right_ergo" in picks:
-            t_r, data_r = picks["manus_right_ergo"]
-            sample["manus_right_ergo"] = data_r
-            sample["manus_right_ergo_t"] = float(t_r)
-
-        if "manus_right_nodes" in picks:
-            t_rn, data_rn = picks["manus_right_nodes"]
-            sample["manus_right_nodes"] = data_rn
-            sample["manus_right_nodes_t"] = float(t_rn)
-
-        if "manus_left_ergo" in picks:
-            t_l, data_l = picks["manus_left_ergo"]
-            sample["manus_left_ergo"] = data_l
-            sample["manus_left_ergo_t"] = float(t_l)
-
-        if "manus_left_nodes" in picks:
-            t_ln, data_ln = picks["manus_left_nodes"]
-            sample["manus_left_nodes"] = data_ln
-            sample["manus_left_nodes_t"] = float(t_ln)
-
         # LUCID camera data
         if "lucid_rgb" in picks:
             t_l, data_l = picks["lucid_rgb"]
             sample["lucid_rgb"] = data_l
             sample["lucid_rgb_t"] = float(t_l)
-
-
-        
-
 
         if self.on_sample:
             self.on_sample(sample)
@@ -288,11 +268,34 @@ class Aggregator:
 # ========== Asynchronous save thread ==========
 
 class SaverWorker:
-    def __init__(self, node, out_dir):
+    def __init__(
+        self,
+        node,
+        out_dir,
+        save_format="npz",
+        fps=5.0,
+        robot_type="custom",
+        task_name="default_task",
+        chunk_size=1000,
+    ):
         self.node = node
         self.out_dir = out_dir
+        self.save_format = str(save_format)
         os.makedirs(out_dir, exist_ok=True)
         self.q = queue.Queue()
+        self.lerobot_writer = None
+        if self.save_format == "lerobot_v21":
+            from .lerobot_dataset_export import LeRobotV21DatasetWriter
+
+            self.lerobot_writer = LeRobotV21DatasetWriter(
+                dataset_root=out_dir,
+                fps=fps,
+                robot_type=robot_type,
+                default_task=task_name,
+                chunk_size=chunk_size,
+            )
+        elif self.save_format != "npz":
+            raise ValueError(f"Unsupported save_format: {self.save_format}")
         self.th = threading.Thread(target=self._loop, daemon=True)
         self.th.start()
 
@@ -312,16 +315,23 @@ class SaverWorker:
     def _loop(self):
         while True:
             try:
-                payload = self.q.get(timeout=0.5)  
+                payload = self.q.get(timeout=0.5)
             except queue.Empty:
-                if not rclpy.ok():  
+                if not rclpy.ok():
                     break
                 continue
 
             try:
-                self._save_npz(payload)
+                if self.save_format == "npz":
+                    self._save_npz(payload)
+                else:
+                    self._save_lerobot(payload)
             except Exception as e:
                 self.node.get_logger().error(f"Save error: {e}")
+                self.node.get_logger().error(traceback.format_exc())
+                self.node.get_logger().error(
+                    f"Save payload keys: {sorted(payload.get('arrays', {}).keys())}"
+                )
             finally:
                 self.q.task_done()
 
@@ -349,14 +359,45 @@ class SaverWorker:
 
         self.node.get_logger().info(f"Saved episode to {path}")
 
+    def _save_lerobot(self, payload):
+        episode_index, parquet_path = self.lerobot_writer.save_episode(
+            arrays=payload["arrays"],
+            episode_id=payload["episode_id"],
+            task_name=payload.get("task_name"),
+        )
+        self.node.get_logger().info(
+            f"Saved episode {payload['episode_id']} to {parquet_path} "
+            f"(LeRobot episode_index={episode_index})"
+        )
 
 # ========== Episode Recorder ==========
 
 class EpisodeRecorder:
-    def __init__(self, node, workers, out_dir='/tmp/data', rate_hz=5.0, slop_sec=0.1):
+    def __init__(
+        self,
+        node,
+        workers,
+        out_dir='/tmp/data',
+        rate_hz=5.0,
+        slop_sec=0.1,
+        save_format='npz',
+        robot_type='custom',
+        task_name='default_task',
+        chunk_size=1000,
+    ):
         self.node = node
         self.workers = workers
-        self.saver = SaverWorker(node, out_dir)
+        self.save_format = str(save_format)
+        self.task_name = str(task_name)
+        self.saver = SaverWorker(
+            node,
+            out_dir,
+            save_format=self.save_format,
+            fps=rate_hz,
+            robot_type=robot_type,
+            task_name=self.task_name,
+            chunk_size=chunk_size,
+        )
         self.agg = Aggregator(node, workers, rate_hz, slop_sec, self._on_sample)
         self._reset_buffers()
         self.recording = False
@@ -383,9 +424,10 @@ class EpisodeRecorder:
         self.recording = False
         self.agg.stop()
         os.makedirs(self.out_dir, exist_ok=True)
-        path = os.path.join(self.out_dir, f"episode_{self.episode_id}.npz")
+        path = None
+        if self.save_format == 'npz':
+            path = os.path.join(self.out_dir, f"episode_{self.episode_id}.npz")
 
-        # prepare lists
         t_ref_list = []
         t_list = []
 
@@ -399,24 +441,12 @@ class EpisodeRecorder:
         pose_t_list = []
         ultimate_pose_list = []
         ultimate_pose_t_list = []
-
-        # Manus glove data
-        manus_right_ergo_list = []
-        manus_right_ergo_t_list = []
-        manus_right_nodes_list = []
-        manus_right_nodes_t_list = []
-
-        manus_left_ergo_list = []
-        manus_left_ergo_t_list = []
-        manus_left_nodes_list = []
-        manus_left_nodes_t_list = []
-
-        # LUCID camera data
+        franka_ee_pose_list = []
+        franka_ee_pose_t_list = []
+        franka_ee_pose_cmd_list = []
+        franka_ee_pose_cmd_t_list = []
         lucid_rgb_list = []
         lucid_rgb_t_list = []
-
-
-        
 
         for s in self.samples:
             t_ref_list.append(s.get("t_ref", np.nan))
@@ -441,37 +471,24 @@ class EpisodeRecorder:
             if "ultimate_pose" in s:
                 ultimate_pose_list.append(s["ultimate_pose"])
                 ultimate_pose_t_list.append(s.get("ultimate_pose_t", np.nan))
-            
-            # Manus glove data
-            if "manus_right_ergo" in s:
-                manus_right_ergo_list.append(s["manus_right_ergo"])
-                manus_right_ergo_t_list.append(s["manus_right_ergo_t"])
 
-            if "manus_right_nodes" in s:
-                manus_right_nodes_list.append(s["manus_right_nodes"])
-                manus_right_nodes_t_list.append(s["manus_right_nodes_t"])
+            if "franka_ee_pose" in s:
+                franka_ee_pose_list.append(s["franka_ee_pose"])
+                franka_ee_pose_t_list.append(s.get("franka_ee_pose_t", np.nan))
 
-            if "manus_left_ergo" in s:
-                manus_left_ergo_list.append(s["manus_left_ergo"])
-                manus_left_ergo_t_list.append(s["manus_left_ergo_t"])
+            if "franka_ee_pose_cmd" in s:
+                franka_ee_pose_cmd_list.append(s["franka_ee_pose_cmd"])
+                franka_ee_pose_cmd_t_list.append(s.get("franka_ee_pose_cmd_t", np.nan))
 
-            if "manus_left_nodes" in s:
-                manus_left_nodes_list.append(s["manus_left_nodes"])
-                manus_left_nodes_t_list.append(s["manus_left_nodes_t"])
-
-            # LUCID camera data
             if "lucid_rgb" in s:
                 lucid_rgb_list.append(s["lucid_rgb"])
                 lucid_rgb_t_list.append(s["lucid_rgb_t"])
 
-
-        # assemble arrays
         arrays = {
             "t_ref": np.array(t_ref_list, dtype=np.float64),
             "t": np.array(t_list, dtype=np.float64),
         }
 
-        # convenience handle
         t_ref_arr = arrays["t_ref"]
 
         if rgb_list:
@@ -506,57 +523,50 @@ class EpisodeRecorder:
             ultimate_pose_t_arr = np.array(ultimate_pose_t_list, dtype=np.float64)
             arrays["ultimate_pose_t"] = ultimate_pose_t_arr
             arrays["ultimate_pose_dt"] = ultimate_pose_t_arr - t_ref_arr
-        
-        # Manus glove data
-        if manus_right_ergo_list:
-            arrays["manus_right_ergo"] = np.array(manus_right_ergo_list, dtype=object)
-            t_arr = np.array(manus_right_ergo_t_list, dtype=np.float64)
-            arrays["manus_right_ergo_t"] = t_arr
-            arrays["manus_right_ergo_dt"] = t_arr - t_ref_arr
 
-        if manus_right_nodes_list:
-            arrays["manus_right_nodes"] = np.array(manus_right_nodes_list, dtype=object)
-            t_arr = np.array(manus_right_nodes_t_list, dtype=np.float64)
-            arrays["manus_right_nodes_t"] = t_arr
-            arrays["manus_right_nodes_dt"] = t_arr - t_ref_arr
+        if franka_ee_pose_list:
+            arrays["franka_ee_pose"] = np.array(franka_ee_pose_list, dtype=np.float64)
+            franka_ee_pose_t_arr = np.array(franka_ee_pose_t_list, dtype=np.float64)
+            arrays["franka_ee_pose_t"] = franka_ee_pose_t_arr
+            arrays["franka_ee_pose_dt"] = franka_ee_pose_t_arr - t_ref_arr
 
-        if manus_left_ergo_list:
-            arrays["manus_left_ergo"] = np.array(manus_left_ergo_list, dtype=object)
-            t_arr = np.array(manus_left_ergo_t_list, dtype=np.float64)
-            arrays["manus_left_ergo_t"] = t_arr
-            arrays["manus_left_ergo_dt"] = t_arr - t_ref_arr
+        if franka_ee_pose_cmd_list:
+            arrays["franka_ee_pose_cmd"] = np.array(franka_ee_pose_cmd_list, dtype=np.float64)
+            franka_ee_pose_cmd_t_arr = np.array(franka_ee_pose_cmd_t_list, dtype=np.float64)
+            arrays["franka_ee_pose_cmd_t"] = franka_ee_pose_cmd_t_arr
+            arrays["franka_ee_pose_cmd_dt"] = franka_ee_pose_cmd_t_arr - t_ref_arr
 
-        if manus_left_nodes_list:
-            arrays["manus_left_nodes"] = np.array(manus_left_nodes_list, dtype=object)
-            t_arr = np.array(manus_left_nodes_t_list, dtype=np.float64)
-            arrays["manus_left_nodes_t"] = t_arr
-            arrays["manus_left_nodes_dt"] = t_arr - t_ref_arr
-
-        # LUCID camera data
         if lucid_rgb_list:
             arrays["lucid_rgb"] = np.array(lucid_rgb_list, dtype=object)
-            t_arr = np.array(lucid_rgb_t_list, dtype=np.float64)
-            arrays["lucid_rgb_t"] = t_arr
-            arrays["lucid_rgb_dt"] = t_arr - t_ref_arr
-
-
-
-
+            lucid_t_arr = np.array(lucid_rgb_t_list, dtype=np.float64)
+            arrays["lucid_rgb_t"] = lucid_t_arr
+            arrays["lucid_rgb_dt"] = lucid_t_arr - t_ref_arr
 
         meta = {
             "episode_id": self.episode_id,
             "n_samples": len(self.samples),
-            "keys": list(arrays.keys())
+            "keys": list(arrays.keys()),
+            "save_format": self.save_format,
+            "task_name": self.task_name,
         }
 
-        # save asynchronously
-        self.saver.save_async({"path": path, "arrays": arrays, "meta": meta})
-        return True, f"Saved {len(self.samples)} samples to {path}"
+        payload = {
+            "arrays": arrays,
+            "meta": meta,
+            "episode_id": self.episode_id,
+            "task_name": self.task_name,
+        }
+        if path is not None:
+            payload["path"] = path
+            save_msg = f"Saved {len(self.samples)} samples to {path}"
+        else:
+            save_msg = f"Queued {len(self.samples)} samples for LeRobot export under {self.out_dir}"
+        self.saver.save_async(payload)
+        return True, save_msg
 
     def shutdown(self):
         self.agg.stop()
         self.saver.join()
-
 
 # ========== Main Node ==========
 
@@ -576,20 +586,24 @@ class DataRecorderNode(Node):
         self.declare_parameter('enable_tactile', True)
         self.declare_parameter('rgb_topic', '/camera_up/color/image_rect_raw')
         self.declare_parameter('rgb2_topic', '/camera_down/color/image_rect_raw')
+        self.declare_parameter('rgb_resize_width', 0)
+        self.declare_parameter('rgb_resize_height', 0)
+        self.declare_parameter('rgb2_resize_width', 0)
+        self.declare_parameter('rgb2_resize_height', 0)
         self.declare_parameter('vive_topic', '/vive_tracker/pose')
         self.declare_parameter('tactile_topic', '/gelsight/image_raw')
         self.declare_parameter('vive_ultimate_topic', '/vive_ultimate_tracker/pose')
-        # ---- Manus glove parameters ----
-        self.declare_parameter('manus_right_topic', '/manus_glove_right_corrected')
-        self.declare_parameter('manus_left_topic',  '/manus_glove_left_corrected')
-        self.declare_parameter('enable_manus_right_ergo', True)
-        self.declare_parameter('enable_manus_left_ergo', False)
-        self.declare_parameter('enable_manus_right_nodes', True)
-        self.declare_parameter('enable_manus_left_nodes', False)
-
+        self.declare_parameter('enable_franka_ee_pose', False)
+        self.declare_parameter('enable_franka_ee_pose_cmd', False)
+        self.declare_parameter('franka_ee_pose_topic', '/frankaRight/ee_pose')
+        self.declare_parameter('franka_ee_pose_cmd_topic', '/frankaRight/ee_pose_cmd')
         # ---- LUCID camera parameters ----
         self.declare_parameter('enable_lucid', False)
         self.declare_parameter('lucid_topic', '/rgb_lucid')
+        self.declare_parameter('save_format', 'npz')
+        self.declare_parameter('robot_type', 'custom')
+        self.declare_parameter('task_name', 'default_task')
+        self.declare_parameter('lerobot_chunk_size', 1000)
 
         
 
@@ -606,23 +620,24 @@ class DataRecorderNode(Node):
 
         rgb_topic = self.get_parameter('rgb_topic').value
         rgb2_topic = self.get_parameter('rgb2_topic').value
+        rgb_resize_width = self.get_parameter('rgb_resize_width').value
+        rgb_resize_height = self.get_parameter('rgb_resize_height').value
+        rgb2_resize_width = self.get_parameter('rgb2_resize_width').value
+        rgb2_resize_height = self.get_parameter('rgb2_resize_height').value
         vive_topic = self.get_parameter('vive_topic').value
         vive_ultimate_topic = self.get_parameter('vive_ultimate_topic').value
         tactile_topic = self.get_parameter('tactile_topic').value
-
-        # ---- Manus glove enable flags ----
-        enable_manus_right_ergo  = self.get_parameter('enable_manus_right_ergo').value
-        enable_manus_left_ergo   = self.get_parameter('enable_manus_left_ergo').value
-        enable_manus_right_nodes = self.get_parameter('enable_manus_right_nodes').value
-        enable_manus_left_nodes  = self.get_parameter('enable_manus_left_nodes').value
-
-        # Manus topics
-        manus_right_topic = self.get_parameter('manus_right_topic').value
-        manus_left_topic  = self.get_parameter('manus_left_topic').value
-
+        enable_franka_ee_pose = self.get_parameter('enable_franka_ee_pose').value
+        enable_franka_ee_pose_cmd = self.get_parameter('enable_franka_ee_pose_cmd').value
+        franka_ee_pose_topic = self.get_parameter('franka_ee_pose_topic').value
+        franka_ee_pose_cmd_topic = self.get_parameter('franka_ee_pose_cmd_topic').value
         # LUCID camera topics
         enable_lucid = self.get_parameter('enable_lucid').value
         lucid_topic  = self.get_parameter('lucid_topic').value
+        save_format = self.get_parameter('save_format').value
+        robot_type = self.get_parameter('robot_type').value
+        task_name = self.get_parameter('task_name').value
+        lerobot_chunk_size = self.get_parameter('lerobot_chunk_size').value
 
 
         
@@ -631,34 +646,27 @@ class DataRecorderNode(Node):
         self.workers = {}
 
         if enable_rgb:
-            self.workers["realsense_rgb"] = RealSenseRGBRecorder(self, rgb_topic)
+            self.workers["realsense_rgb"] = RealSenseRGBRecorder(
+                self, rgb_topic, rgb_resize_width, rgb_resize_height
+            )
         if enable_rgb2:
-            self.workers["realsense_rgb2"] = RealSenseRGBRecorder(self, rgb2_topic)
+            self.workers["realsense_rgb2"] = RealSenseRGBRecorder(
+                self, rgb2_topic, rgb2_resize_width, rgb2_resize_height
+            )
         if enable_vive:
             self.workers["vive_tracker"] = ViveTrackerRecorder(self, vive_topic)
         if enable_vive_ultimate:
             self.workers["vive_ultimate"] = ViveUltimateTrackerRecorder(self, vive_ultimate_topic)
         if enable_tactile:
             self.workers["tactile_sensor"] = TactileSensorRecorder(self, tactile_topic)
-
-        # ---- Manus glove workers ----
-        if enable_manus_right_ergo:
-            self.workers["manus_right_ergo"] = ManusErgoRecorder(
-                self, manus_right_topic, "ManusRightErgo"
+        if enable_franka_ee_pose:
+            self.workers["franka_ee_pose"] = Float64ArrayRecorder(
+                self, franka_ee_pose_topic, "FrankaEEPose"
             )
-        if enable_manus_right_nodes:
-            self.workers["manus_right_nodes"] = ManusNodesRecorder(
-                self, manus_right_topic, "ManusRightNodes"
+        if enable_franka_ee_pose_cmd:
+            self.workers["franka_ee_pose_cmd"] = Float64ArrayRecorder(
+                self, franka_ee_pose_cmd_topic, "FrankaEEPoseCmd"
             )
-        if enable_manus_left_ergo:
-            self.workers["manus_left_ergo"] = ManusErgoRecorder(
-                self, manus_left_topic, "ManusLeftErgo"
-            )
-        if enable_manus_left_nodes:
-            self.workers["manus_left_nodes"] = ManusNodesRecorder(
-                self, manus_left_topic, "ManusLeftNodes"
-            )
-
         # ---- LUCID camera workers ----
         if enable_lucid:
             self.workers["lucid_rgb"] = LucidRGBRecorder(self, lucid_topic)
@@ -669,14 +677,27 @@ class DataRecorderNode(Node):
             self.get_logger().warn("⚠️ No sensor workers enabled! Nothing will be recorded.")
 
         # --- episode recorder ---
-        self.episode = EpisodeRecorder(self, self.workers, out_dir, rate_hz, slop_sec)
+        self.episode = EpisodeRecorder(
+            self,
+            self.workers,
+            out_dir,
+            rate_hz,
+            slop_sec,
+            save_format=save_format,
+            robot_type=robot_type,
+            task_name=task_name,
+            chunk_size=lerobot_chunk_size,
+        )
 
         # --- services ---
         self.start_srv = self.create_service(Trigger, 'start_episode', self._srv_start)
         self.stop_srv = self.create_service(Trigger, 'stop_episode', self._srv_stop)
 
         active = ', '.join(self.workers.keys())
-        self.get_logger().info(f"Recorder with timestamps ready. Active modalities: {active or 'None'}")
+        self.get_logger().info(
+            f"Recorder with timestamps ready. Active modalities: {active or 'None'}; "
+            f"save_format={save_format}"
+        )
 
     def _srv_start(self, request, response):
         ok, msg = self.episode.start()

@@ -14,31 +14,31 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_rgb', default_value='false'),
         DeclareLaunchArgument('enable_rgb2', default_value='false'),
         DeclareLaunchArgument('enable_vive', default_value='false'),
-        DeclareLaunchArgument('enable_ultimate_vive', default_value='true'),
-        DeclareLaunchArgument('enable_tactile', default_value='true'),
+        DeclareLaunchArgument('enable_ultimate_vive', default_value='false'),
+        DeclareLaunchArgument('enable_tactile', default_value='false'),
+        DeclareLaunchArgument('enable_franka_ee_pose', default_value='false'),
+        DeclareLaunchArgument('enable_franka_ee_pose_cmd', default_value='false'),
 
         DeclareLaunchArgument('rgb_topic', default_value='/camera_up/color/image_rect_raw'),
         DeclareLaunchArgument('rgb2_topic', default_value='/camera_down/color/image_rect_raw'),
+        DeclareLaunchArgument('rgb_resize_width', default_value='0'),
+        DeclareLaunchArgument('rgb_resize_height', default_value='0'),
+        DeclareLaunchArgument('rgb2_resize_width', default_value='0'),
+        DeclareLaunchArgument('rgb2_resize_height', default_value='0'),
         DeclareLaunchArgument('tactile_topic', default_value='/gelsight/image_raw'),
         DeclareLaunchArgument('vive_topic', default_value='/vive_tracker/pose'),
         DeclareLaunchArgument('ultimate_vive_topic', default_value='/vive_ultimate_tracker/pose'),
-
-        # -------------------------------
-        # Manus glove parameters
-        # -------------------------------
-        DeclareLaunchArgument('enable_manus_right_ergo', default_value='false'),
-        DeclareLaunchArgument('enable_manus_left_ergo',  default_value='false'),
-        DeclareLaunchArgument('enable_manus_right_nodes', default_value='false'),
-        DeclareLaunchArgument('enable_manus_left_nodes',  default_value='false'),
-
-        DeclareLaunchArgument('manus_right_topic', default_value='/manus_glove_right_corrected'),
-        DeclareLaunchArgument('manus_left_topic',  default_value='/manus_glove_left_corrected'),
-
+        DeclareLaunchArgument('franka_ee_pose_topic', default_value='/frankaRight/ee_pose'),
+        DeclareLaunchArgument('franka_ee_pose_cmd_topic', default_value='/frankaRight/ee_pose_cmd'),
         # -------------------------------
         # LUCID camera parameters 
         # -------------------------------
-        DeclareLaunchArgument('enable_lucid', default_value='true'),
+        DeclareLaunchArgument('enable_lucid', default_value='false'),
         DeclareLaunchArgument('lucid_topic', default_value='/rgb_lucid'),
+        DeclareLaunchArgument('save_format', default_value='npz'),
+        DeclareLaunchArgument('robot_type', default_value='custom'),
+        DeclareLaunchArgument('task_name', default_value='default_task'),
+        DeclareLaunchArgument('lerobot_chunk_size', default_value='1000'),
 
         # --- NEW node launch (timestamps version) ---
         Node(
@@ -54,26 +54,28 @@ def generate_launch_description():
                     'enable_rgb': LaunchConfiguration('enable_rgb'),
                     'enable_rgb2': LaunchConfiguration('enable_rgb2'),
                     'enable_vive': LaunchConfiguration('enable_vive'),
-                    'enable_ultimate_vive': LaunchConfiguration('enable_ultimate_vive'),
+                    'enable_vive_ultimate': LaunchConfiguration('enable_ultimate_vive'),
                     'enable_tactile': LaunchConfiguration('enable_tactile'),
+                    'enable_franka_ee_pose': LaunchConfiguration('enable_franka_ee_pose'),
+                    'enable_franka_ee_pose_cmd': LaunchConfiguration('enable_franka_ee_pose_cmd'),
                     'rgb_topic': LaunchConfiguration('rgb_topic'),
                     'rgb2_topic': LaunchConfiguration('rgb2_topic'),
+                    'rgb_resize_width': LaunchConfiguration('rgb_resize_width'),
+                    'rgb_resize_height': LaunchConfiguration('rgb_resize_height'),
+                    'rgb2_resize_width': LaunchConfiguration('rgb2_resize_width'),
+                    'rgb2_resize_height': LaunchConfiguration('rgb2_resize_height'),
                     'tactile_topic': LaunchConfiguration('tactile_topic'),
                     'vive_topic': LaunchConfiguration('vive_topic'),
-                    'ultimate_vive_topic': LaunchConfiguration('ultimate_vive_topic'),
-
-                    # manus glove
-                    'enable_manus_right_ergo': LaunchConfiguration('enable_manus_right_ergo'),
-                    'enable_manus_left_ergo':  LaunchConfiguration('enable_manus_left_ergo'),
-                    'enable_manus_right_nodes': LaunchConfiguration('enable_manus_right_nodes'),
-                    'enable_manus_left_nodes':  LaunchConfiguration('enable_manus_left_nodes'),
-
-                    'manus_right_topic': LaunchConfiguration('manus_right_topic'),
-                    'manus_left_topic':  LaunchConfiguration('manus_left_topic'),
-
+                    'vive_ultimate_topic': LaunchConfiguration('ultimate_vive_topic'),
+                    'franka_ee_pose_topic': LaunchConfiguration('franka_ee_pose_topic'),
+                    'franka_ee_pose_cmd_topic': LaunchConfiguration('franka_ee_pose_cmd_topic'),
                     # LUCID camera
                     'enable_lucid': LaunchConfiguration('enable_lucid'),
                     'lucid_topic':  LaunchConfiguration('lucid_topic'),
+                    'save_format': LaunchConfiguration('save_format'),
+                    'robot_type': LaunchConfiguration('robot_type'),
+                    'task_name': LaunchConfiguration('task_name'),
+                    'lerobot_chunk_size': LaunchConfiguration('lerobot_chunk_size'),
                 
                 }
             ]

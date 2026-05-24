@@ -123,36 +123,6 @@ class ViveUltimateTrackerRecorder(RecorderWorker):
         super().__init__(node, topic, PoseStamped, parse_fn, name='ViveUltimateTracker')
 
 
-class ManusFingertipRecorder(RecorderWorker):
-    """Record fingertip poses (5 fingers × 7 values)."""
-    def __init__(self, node, topic, name):
-        from manus_msg.msg import PoseStampedArray
-
-        def parse_fn(msg: PoseStampedArray):
-            arr = []
-            for p in msg.poses:
-                pos = p.pose.position
-                ori = p.pose.orientation
-                arr.append([
-                    pos.x, pos.y, pos.z,
-                    ori.x, ori.y, ori.z, ori.w
-                ])
-            return np.array(arr, dtype=np.float32)  # (5, 7)
-
-        super().__init__(node, topic, PoseStampedArray, parse_fn, name=name)
-
-
-class ManusGloveDataRecorder(RecorderWorker):
-    """Record 20D glove flexion sensor values."""
-    def __init__(self, node, topic, name):
-        from std_msgs.msg import Float64MultiArray
-
-        def parse_fn(msg: Float64MultiArray):
-            return np.array(msg.data, dtype=np.float32)  # (20,)
-
-        super().__init__(node, topic, Float64MultiArray, parse_fn, name=name)
-
-
 # ========== Aggregator ==========
 
 class Aggregator:
@@ -219,15 +189,6 @@ class Aggregator:
             sample["pose_ultimate"] = picks["vive_ultimate_tracker"][1]
         if "tactile_sensor" in picks:
             sample["tactile"] = picks["tactile_sensor"][1]
-        if "fingertip_left" in picks:
-            sample["fingertip_left"] = picks["fingertip_left"][1]
-        if "fingertip_right" in picks:
-            sample["fingertip_right"] = picks["fingertip_right"][1]
-        if "glove_left" in picks:
-            sample["glove_left"] = picks["glove_left"][1]
-        if "glove_right" in picks:
-            sample["glove_right"] = picks["glove_right"][1]
-
         if self.on_sample:
             self.on_sample(sample)
 
@@ -351,12 +312,6 @@ class EpisodeRecorder:
         tactile_list = []
         pose_list = []
         pose_ultimate_list = []
-        fingertip_left_list = []
-        fingertip_right_list = []
-        glove_left_list = []
-        glove_right_list = []
-
-
         for s in self.samples:
             t_list.append(s.get("t", np.nan))
             if "rgb" in s:
@@ -369,15 +324,6 @@ class EpisodeRecorder:
                 pose_list.append(s["pose"])
             if "pose_ultimate" in s:
                 pose_ultimate_list.append(s["pose_ultimate"])
-            if "fingertip_left" in s:
-                fingertip_left_list.append(s["fingertip_left"])
-            if "fingertip_right" in s:
-                fingertip_right_list.append(s["fingertip_right"])
-            if "glove_left" in s:
-                glove_left_list.append(s["glove_left"])
-            if "glove_right" in s:
-                glove_right_list.append(s["glove_right"])
-
         # assemble arrays 
         arrays = {
             "t": np.array(t_list, dtype=np.float64),
@@ -393,16 +339,6 @@ class EpisodeRecorder:
             arrays["rgb2"] = np.array(rgb2_list, dtype=object)
         if tactile_list:
             arrays["tactile"] = np.array(tactile_list, dtype=object)
-        if fingertip_left_list:
-            arrays["fingertip_left"] = np.array(fingertip_left_list, dtype=np.float32)
-        if fingertip_right_list:
-            arrays["fingertip_right"] = np.array(fingertip_right_list, dtype=np.float32)
-        if glove_left_list:
-            arrays["glove_left"] = np.array(glove_left_list, dtype=np.float32)
-        if glove_right_list:
-            arrays["glove_right"] = np.array(glove_right_list, dtype=np.float32)
-
-
         meta = {
             "episode_id": self.episode_id,
             "n_samples": len(self.samples),
@@ -438,17 +374,6 @@ class DataRecorderNode(Node):
         self.declare_parameter('vive_topic', '/vive_tracker/pose')
         self.declare_parameter('tactile_topic', '/gelsight/image_raw')
         self.declare_parameter('vive_ultimate_topic', '/vive_ultimate_tracker/pose')
-
-        # Manus glove parameters
-        self.declare_parameter('enable_fingertip_left', True)
-        self.declare_parameter('enable_glove_left', True)
-        self.declare_parameter('enable_fingertip_right', True)
-        self.declare_parameter('enable_glove_right', True)
-        self.declare_parameter('fingertip_left_topic', '/manus_fingertip_left')
-        self.declare_parameter('fingertip_right_topic', '/manus_fingertip_right')
-        self.declare_parameter('glove_left_topic', '/manus_glove_data_left')
-        self.declare_parameter('glove_right_topic', '/manus_glove_data_right')
-
         # read parameters
         out_dir = self.get_parameter('out_dir').value
         rate_hz = self.get_parameter('rate_hz').value
@@ -463,17 +388,6 @@ class DataRecorderNode(Node):
         tactile_topic = self.get_parameter('tactile_topic').value
         enable_vive_ultimate = self.get_parameter('enable_vive_ultimate').value
         vive_ultimate_topic = self.get_parameter('vive_ultimate_topic').value
-
-        # Manus glove parameters
-        enable_fingertip_left = self.get_parameter('enable_fingertip_left').value
-        enable_glove_left = self.get_parameter('enable_glove_left').value
-        enable_fingertip_right = self.get_parameter('enable_fingertip_right').value
-        enable_glove_right = self.get_parameter('enable_glove_right').value
-        fingertip_left_topic = self.get_parameter('fingertip_left_topic').value
-        fingertip_right_topic = self.get_parameter('fingertip_right_topic').value
-        glove_left_topic = self.get_parameter('glove_left_topic').value
-        glove_right_topic = self.get_parameter('glove_right_topic').value
-
         # --- create workers dynamically ---
         self.workers = {}
 
@@ -487,28 +401,6 @@ class DataRecorderNode(Node):
             self.workers["vive_ultimate_tracker"] = ViveUltimateTrackerRecorder(self, vive_ultimate_topic)
         if enable_tactile:
             self.workers["tactile_sensor"] = TactileSensorRecorder(self, tactile_topic)
-        # Manus fingertips (5×7)
-        if enable_fingertip_left:
-            self.workers["fingertip_left"] = ManusFingertipRecorder(
-                self, fingertip_left_topic, "ManusFingertipLeft"
-            )
-        if enable_fingertip_right:
-            self.workers["fingertip_right"] = ManusFingertipRecorder(
-                self, fingertip_right_topic, "ManusFingertipRight"
-            )
-
-        # Manus glove flexion (20D)
-        if enable_glove_left:
-            self.workers["glove_left"] = ManusGloveDataRecorder(
-                self, glove_left_topic, "ManusGloveLeft"
-            )
-        if enable_glove_right:
-            self.workers["glove_right"] = ManusGloveDataRecorder(
-                self, glove_right_topic, "ManusGloveRight"
-            )
-
-            
-
 
         if not self.workers:
             self.get_logger().warn("⚠️ No sensor workers enabled! Nothing will be recorded.")
