@@ -50,7 +50,8 @@ pixi run ros2 launch multi_modal_data_collection record_multimodal_with_timestam
   enable_franka_gripper_grasp:=true \
   enable_rgb:=true \
   enable_rgb2:=true \
-  rgb_topic:=/camera/camera/color/image_raw \
+  rgb_topic:=/cam1/cam1/color/image_raw \
+  rgb2_topic:=/cam2/cam2/color/image_raw \
   rgb_resize_width:=320 \
   rgb2_resize_width:=320 \
   rgb_resize_height:=240 \
@@ -61,9 +62,16 @@ pixi run ros2 launch multi_modal_data_collection record_multimodal_with_timestam
   robot_type:=franka
 pixi run ros2 run multi_modal_data_collection footswitch_trigger_node
 ```
-  
-## When to use this package-local manifest
+## If foot stepper doesn't work
 
+```bash
+ls -la /dev/input/by-id/usb-PCsensor_FootSwitch-event-kbd
+groups tp2
+sudo usermod -aG input tp2
+newgrp input
+```
+
+## When to use this package-local manifest
 Use `src/multi_modal_data_collection/pixi.toml` only if you intentionally want to work with this package in isolation from the rest of the workspace.
 
 For the full install, build, and run workflow, see:
