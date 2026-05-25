@@ -84,6 +84,14 @@ class LeRobotV21DatasetWriter:
         "franka_ee_pose_dt",
         "franka_ee_pose_cmd_t",
         "franka_ee_pose_cmd_dt",
+        "franka_gripper_width_t",
+        "franka_gripper_width_dt",
+        "franka_gripper_grasp_t",
+        "franka_gripper_grasp_dt",
+        "franka_gripper_state_t",
+        "franka_gripper_state_dt",
+        "franka_gripper_cmd_t",
+        "franka_gripper_cmd_dt",
         "lucid_rgb_t",
         "lucid_rgb_dt",
     }
@@ -138,18 +146,71 @@ class LeRobotV21DatasetWriter:
 
         raise ValueError("Input does not look like a valid homogeneous transform matrix")
 
-    def _flat_transform_to_pose_vector(self, value, dual_gripper=False):
-        matrix = self._flat_transform_to_matrix(value)
-        position = matrix[:3, 3].astype(np.float32)
-        rotation = matrix[:3, :3].astype(np.float64)
+    @staticmethod
+    def _quaternion_to_rotation_matrix(quaternion):
+        quat = np.asarray(quaternion, dtype=np.float64).reshape(-1)
+        if quat.size != 4:
+            raise ValueError(f"Expected quaternion with 4 values, got {quat.size}")
+
+        norm = np.linalg.norm(quat)
+        if norm <= 0.0:
+            raise ValueError("Quaternion norm must be positive")
+
+        x, y, z, w = quat / norm
+        return np.array(
+            [
+                [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+                [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+                [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+            ],
+            dtype=np.float64,
+        )
+
+    @staticmethod
+    def _coerce_gripper_values(value, dual_gripper=False):
+        gripper = np.asarray(value, dtype=np.float32).reshape(-1)
+        target_size = 2 if dual_gripper else 1
+
+        if gripper.size == 0:
+            return np.zeros(target_size, dtype=np.float32)
+        if dual_gripper:
+            if gripper.size == 1:
+                return np.repeat(gripper, 2).astype(np.float32)
+            return gripper[:2].astype(np.float32)
+        return gripper[:1].astype(np.float32)
+
+    def _robot_pose_to_pose_vector(self, value, gripper_value=None, dual_gripper=False):
+        pose = np.asarray(value, dtype=np.float64).reshape(-1)
+        if pose.size == 16:
+            matrix = self._flat_transform_to_matrix(pose)
+            position = matrix[:3, 3].astype(np.float32)
+            rotation = matrix[:3, :3].astype(np.float64)
+        elif pose.size == 7:
+            position = pose[:3].astype(np.float32)
+            rotation = self._quaternion_to_rotation_matrix(pose[3:])
+        else:
+            raise ValueError(
+                f"Expected a 4x4 transform (16 values) or pose+quaternion (7 values), got {pose.size}"
+            )
+
         rotvec, _ = cv2.Rodrigues(rotation)
         rotvec = rotvec.reshape(3).astype(np.float32)
 
-        if dual_gripper:
-            gripper = np.zeros(2, dtype=np.float32)
+        if gripper_value is None:
+            gripper = np.zeros(2 if dual_gripper else 1, dtype=np.float32)
         else:
-            gripper = np.zeros(1, dtype=np.float32)
+            gripper = self._coerce_gripper_values(gripper_value, dual_gripper=dual_gripper)
         return np.concatenate([position, rotvec, gripper], dtype=np.float32)
+
+    @staticmethod
+    def _is_string_array(arr):
+        if arr.ndim != 1:
+            return False
+        if arr.dtype.kind in {"U", "S"}:
+            return True
+        if arr.dtype.kind != "O":
+            return False
+        return all(isinstance(v, (str, bytes, np.str_, np.bytes_)) for v in arr.tolist())
 
     def save_episode(self, arrays, episode_id, task_name=None):
         from datasets import Dataset, Features, Image, Sequence, Value
@@ -214,8 +275,22 @@ class LeRobotV21DatasetWriter:
 
         franka_state_array = arrays.get("franka_ee_pose")
         franka_action_array = arrays.get("franka_ee_pose_cmd")
+        # Prefer legacy dedicated gripper keys when present, but let the new
+        # boolean grasp signal populate both state and action as a fallback.
+        franka_gripper_state_array = arrays.get("franka_gripper_state")
+        if franka_gripper_state_array is None:
+            franka_gripper_state_array = arrays.get("franka_gripper_grasp")
+        franka_gripper_cmd_array = arrays.get("franka_gripper_cmd")
+        if franka_gripper_cmd_array is None:
+            franka_gripper_cmd_array = arrays.get("franka_gripper_grasp")
         use_franka_state = franka_state_array is not None and len(franka_state_array) == n_frames
         use_franka_action = franka_action_array is not None and len(franka_action_array) == n_frames
+        use_franka_gripper_state = (
+            franka_gripper_state_array is not None and len(franka_gripper_state_array) == n_frames
+        )
+        use_franka_gripper_cmd = (
+            franka_gripper_cmd_array is not None and len(franka_gripper_cmd_array) == n_frames
+        )
 
         if use_franka_state:
             feature_specs["state"] = Sequence(Value("float32"), length=len(self.FRANKA_STATE_NAMES))
@@ -257,13 +332,21 @@ class LeRobotV21DatasetWriter:
                 continue
             if key in self.EXTRA_VECTOR_KEY_MAP:
                 continue
-            if key in {"franka_ee_pose", "franka_ee_pose_cmd"}:
+            if key in {
+                "franka_ee_pose",
+                "franka_ee_pose_cmd",
+                "franka_gripper_state",
+                "franka_gripper_cmd",
+            }:
                 continue
             if key in self.EXCLUDED_EXPORT_KEYS:
                 continue
             arr = np.asarray(value)
             if arr.ndim == 1:
-                dtype = "int64" if key in self.INT64_KEYS else "float32"
+                if self._is_string_array(arr):
+                    dtype = "string"
+                else:
+                    dtype = "int64" if key in self.INT64_KEYS else "float32"
                 feature_specs[key] = Value(dtype)
                 info_features[key] = {"dtype": dtype, "shape": [1], "names": None}
             elif arr.ndim == 2:
@@ -292,8 +375,12 @@ class LeRobotV21DatasetWriter:
                 row[column_name] = np.asarray(image_array[i], dtype=np.uint8)
 
             if use_franka_state:
-                row["state"] = self._flat_transform_to_pose_vector(
-                    franka_state_array[i], dual_gripper=True
+                row["state"] = self._robot_pose_to_pose_vector(
+                    franka_state_array[i],
+                    gripper_value=(
+                        franka_gripper_state_array[i] if use_franka_gripper_state else None
+                    ),
+                    dual_gripper=True,
                 ).tolist()
             elif primary_state_key is not None:
                 row["observation.state"] = (
@@ -301,8 +388,12 @@ class LeRobotV21DatasetWriter:
                 )
 
             if use_franka_action:
-                row["actions"] = self._flat_transform_to_pose_vector(
-                    franka_action_array[i], dual_gripper=False
+                row["actions"] = self._robot_pose_to_pose_vector(
+                    franka_action_array[i],
+                    gripper_value=(
+                        franka_gripper_cmd_array[i] if use_franka_gripper_cmd else None
+                    ),
+                    dual_gripper=False,
                 ).tolist()
 
             for source_key, column_name in self.EXTRA_VECTOR_KEY_MAP.items():
@@ -319,13 +410,20 @@ class LeRobotV21DatasetWriter:
                     continue
                 if key in self.EXTRA_VECTOR_KEY_MAP:
                     continue
-                if key in {"franka_ee_pose", "franka_ee_pose_cmd"}:
+                if key in {
+                    "franka_ee_pose",
+                    "franka_ee_pose_cmd",
+                    "franka_gripper_state",
+                    "franka_gripper_cmd",
+                }:
                     continue
                 if key in self.EXCLUDED_EXPORT_KEYS:
                     continue
                 arr = np.asarray(value)
                 if arr.ndim == 1:
-                    if key in self.INT64_KEYS:
+                    if self._is_string_array(arr):
+                        row[key] = str(arr[i])
+                    elif key in self.INT64_KEYS:
                         row[key] = int(arr[i])
                     else:
                         row[key] = float(arr[i])
@@ -461,7 +559,10 @@ class LeRobotV21DatasetWriter:
             column_values = [row[key] for row in rows]
             first = column_values[0]
             if isinstance(first, list):
-                arr = np.asarray(column_values, dtype=np.float32)
+                try:
+                    arr = np.asarray(column_values, dtype=np.float32)
+                except (TypeError, ValueError):
+                    continue
                 stats[key] = {
                     "min": arr.min(axis=0).tolist(),
                     "max": arr.max(axis=0).tolist(),
@@ -471,7 +572,14 @@ class LeRobotV21DatasetWriter:
                 }
             else:
                 arr = np.asarray(column_values)
-                numeric = arr.astype(np.float64)
+                # String metadata columns are valid exports, but they do not
+                # have meaningful numeric summary statistics.
+                if arr.ndim == 1 and self._is_string_array(arr):
+                    continue
+                try:
+                    numeric = arr.astype(np.float64)
+                except (TypeError, ValueError):
+                    continue
                 value_type = int if key in self.INT64_KEYS else float
                 stats[key] = {
                     "min": [value_type(numeric.min())],

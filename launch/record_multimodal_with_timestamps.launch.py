@@ -18,6 +18,8 @@ def generate_launch_description():
         DeclareLaunchArgument('enable_tactile', default_value='false'),
         DeclareLaunchArgument('enable_franka_ee_pose', default_value='false'),
         DeclareLaunchArgument('enable_franka_ee_pose_cmd', default_value='false'),
+        DeclareLaunchArgument('enable_franka_gripper_width', default_value='false'),
+        DeclareLaunchArgument('enable_franka_gripper_grasp', default_value='false'),
 
         DeclareLaunchArgument('rgb_topic', default_value='/camera_up/color/image_rect_raw'),
         DeclareLaunchArgument('rgb2_topic', default_value='/camera_down/color/image_rect_raw'),
@@ -30,6 +32,8 @@ def generate_launch_description():
         DeclareLaunchArgument('ultimate_vive_topic', default_value='/vive_ultimate_tracker/pose'),
         DeclareLaunchArgument('franka_ee_pose_topic', default_value='/frankaRight/ee_pose'),
         DeclareLaunchArgument('franka_ee_pose_cmd_topic', default_value='/frankaRight/ee_pose_cmd'),
+        DeclareLaunchArgument('franka_gripper_width_topic', default_value='/frankaRight/gripper_width'),
+        DeclareLaunchArgument('franka_gripper_grasp_topic', default_value='/frankaRight/is_grasped'),
         # -------------------------------
         # LUCID camera parameters 
         # -------------------------------
@@ -58,6 +62,8 @@ def generate_launch_description():
                     'enable_tactile': LaunchConfiguration('enable_tactile'),
                     'enable_franka_ee_pose': LaunchConfiguration('enable_franka_ee_pose'),
                     'enable_franka_ee_pose_cmd': LaunchConfiguration('enable_franka_ee_pose_cmd'),
+                    'enable_franka_gripper_width': LaunchConfiguration('enable_franka_gripper_width'),
+                    'enable_franka_gripper_grasp': LaunchConfiguration('enable_franka_gripper_grasp'),
                     'rgb_topic': LaunchConfiguration('rgb_topic'),
                     'rgb2_topic': LaunchConfiguration('rgb2_topic'),
                     'rgb_resize_width': LaunchConfiguration('rgb_resize_width'),
@@ -69,6 +75,8 @@ def generate_launch_description():
                     'vive_ultimate_topic': LaunchConfiguration('ultimate_vive_topic'),
                     'franka_ee_pose_topic': LaunchConfiguration('franka_ee_pose_topic'),
                     'franka_ee_pose_cmd_topic': LaunchConfiguration('franka_ee_pose_cmd_topic'),
+                    'franka_gripper_width_topic': LaunchConfiguration('franka_gripper_width_topic'),
+                    'franka_gripper_grasp_topic': LaunchConfiguration('franka_gripper_grasp_topic'),
                     # LUCID camera
                     'enable_lucid': LaunchConfiguration('enable_lucid'),
                     'lucid_topic':  LaunchConfiguration('lucid_topic'),

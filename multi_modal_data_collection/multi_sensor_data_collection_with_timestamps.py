@@ -28,7 +28,7 @@ from rclpy.node import Node
 from std_srvs.srv import Trigger
 from sensor_msgs.msg import Image
 from geometry_msgs.msg import PoseStamped
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Bool, Float64, Float64MultiArray
 from cv_bridge import CvBridge
 
 
@@ -49,26 +49,42 @@ def list_to_object_array(lst):
 
 class RecorderWorker:
     """Subscribe to a topic and buffer parsed data."""
-    def __init__(self, node, topic, msg_type, parse_fn, name='worker', maxlen=1000):
+    def __init__(
+        self,
+        node,
+        topic,
+        msg_type,
+        parse_fn,
+        name='worker',
+        maxlen=1000,
+        metadata_fn=None,
+    ):
         self.node = node
         self.name = name
         self.topic = topic
         self.lock = threading.Lock()
         self.buf = collections.deque(maxlen=maxlen)
         self.parse_fn = parse_fn
+        self.metadata_fn = metadata_fn or (lambda _msg: {})
         self.count = 0
         self.sub = node.create_subscription(msg_type, topic, self._cb, 10)
         node.get_logger().info(f"[{name}] Subscribed to {topic}")
 
+    @staticmethod
+    def _message_time(node, msg):
+        if hasattr(msg, 'header'):
+            t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+            if t > 0.0:
+                return t
+        return t_now(node)
+
     def _cb(self, msg):
         try:
-            if hasattr(msg, 'header'):
-                t = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-            else:
-                t = t_now(self.node)
+            t = self._message_time(self.node, msg)
             data = self.parse_fn(msg)
+            metadata = self.metadata_fn(msg)
             with self.lock:
-                self.buf.append((t, data))
+                self.buf.append((t, data, metadata))
                 self.count += 1
         except Exception as e:
             self.node.get_logger().warn(f"[{self.name}] parse error: {e}")
@@ -78,10 +94,10 @@ class RecorderWorker:
             if not self.buf:
                 return None
             best, best_dt = None, 1e9
-            for (t, d) in self.buf:
+            for (t, d, metadata) in self.buf:
                 dt = abs(t - t_star)
                 if dt < best_dt:
-                    best, best_dt = (t, d), dt
+                    best, best_dt = (t, d, metadata), dt
             return best if best_dt <= max_slop else None
 
 
@@ -135,7 +151,12 @@ class ViveTrackerRecorder(RecorderWorker):
             q = msg.pose.orientation
             return np.array([p.x, p.y, p.z, q.x, q.y, q.z, q.w], dtype=np.float32)
 
-        super().__init__(node, topic, PoseStamped, parse_fn, name='ViveTracker')
+        def metadata_fn(msg: PoseStamped):
+            return {"frame_id": str(msg.header.frame_id)}
+
+        super().__init__(
+            node, topic, PoseStamped, parse_fn, name='ViveTracker', metadata_fn=metadata_fn
+        )
 
 class ViveUltimateTrackerRecorder(RecorderWorker):
     def __init__(self, node, topic='/vive_ultimate_tracker/pose'):
@@ -144,17 +165,73 @@ class ViveUltimateTrackerRecorder(RecorderWorker):
             q = msg.pose.orientation
             return np.array([p.x, p.y, p.z, q.x, q.y, q.z, q.w], dtype=np.float32)
 
-        super().__init__(node, topic, PoseStamped, parse_fn, name='ViveUltimateTracker')
+        def metadata_fn(msg: PoseStamped):
+            return {"frame_id": str(msg.header.frame_id)}
+
+        super().__init__(
+            node,
+            topic,
+            PoseStamped,
+            parse_fn,
+            name='ViveUltimateTracker',
+            metadata_fn=metadata_fn,
+        )
+
+
+class PoseStampedRecorder(RecorderWorker):
+    """Recorder for PoseStamped topics stored as position + quaternion."""
+
+    def __init__(self, node, topic, name):
+        def parse_fn(msg: PoseStamped):
+            p = msg.pose.position
+            q = msg.pose.orientation
+            return np.array([p.x, p.y, p.z, q.x, q.y, q.z, q.w], dtype=np.float32)
+
+        def metadata_fn(msg: PoseStamped):
+            return {"frame_id": str(msg.header.frame_id)}
+
+        super().__init__(
+            node, topic, PoseStamped, parse_fn, name=name, metadata_fn=metadata_fn
+        )
 
 
 class Float64ArrayRecorder(RecorderWorker):
     """Recorder for Float64MultiArray topics such as 4x4 robot transforms."""
 
-    def __init__(self, node, topic, name):
+    def __init__(self, node, topic, name, valid_sizes=None):
+        valid_sizes = tuple(int(v) for v in valid_sizes) if valid_sizes else ()
+
         def parse_fn(msg: Float64MultiArray):
-            return np.array(msg.data, dtype=np.float64)
+            arr = np.array(msg.data, dtype=np.float64)
+            if valid_sizes and arr.size not in valid_sizes:
+                raise ValueError(
+                    f"expected {valid_sizes} values, received {arr.size} on {topic}"
+                )
+            return arr
 
         super().__init__(node, topic, Float64MultiArray, parse_fn, name=name)
+
+
+class Float64Recorder(RecorderWorker):
+    """Recorder for scalar Float64 topics."""
+
+    def __init__(self, node, topic, name):
+        def parse_fn(msg: Float64):
+            return float(msg.data)
+
+        super().__init__(node, topic, Float64, parse_fn, name=name)
+
+
+class BoolRecorder(RecorderWorker):
+    """Recorder for scalar Bool topics."""
+
+    def __init__(self, node, topic, name):
+        def parse_fn(msg: Bool):
+            return bool(msg.data)
+
+        super().__init__(node, topic, Bool, parse_fn, name=name)
+
+
 class LucidRGBRecorder(RecorderWorker):
     """LUCID RGB image recorder (Bayer BGGR → RGB)."""
 
@@ -191,13 +268,24 @@ class Aggregator:
         self.active = False
         self.node.get_logger().info("Aggregator stopped")
 
+    @staticmethod
+    def _assign_pick(sample, picks, pick_key, sample_key, sample_t_key, sample_frame_key=None):
+        if pick_key not in picks:
+            return
+        t_value, data_value, metadata = picks[pick_key]
+        sample[sample_key] = data_value
+        sample[sample_t_key] = float(t_value)
+        frame_id = str(metadata.get("frame_id", "")).strip()
+        if sample_frame_key and frame_id:
+            sample[sample_frame_key] = frame_id
+
     # using the latest RGB time to sample data from all workers
     def _tick(self):
         if not self.active:
             return
-        # ref_worker = self.workers.get("realsense_rgb")
-        # not hard coded realsense_rgb 
-        ref_worker = next(iter(self.workers.values()))
+        ref_worker = self.workers.get("realsense_rgb")
+        if ref_worker is None:
+            ref_worker = next(iter(self.workers.values()), None)
         if not ref_worker or not ref_worker.buf:
             return
 
@@ -221,45 +309,42 @@ class Aggregator:
         }
 
         # For each modality, store both data and its own timestamp *_t
-        if "realsense_rgb" in picks:
-            t_rgb, data_rgb = picks["realsense_rgb"]
-            sample["rgb"] = data_rgb
-            sample["rgb_t"] = float(t_rgb)
-
-        if "realsense_rgb2" in picks:
-            t_rgb2, data_rgb2 = picks["realsense_rgb2"]
-            sample["rgb2"] = data_rgb2
-            sample["rgb2_t"] = float(t_rgb2)
-
-        if "vive_tracker" in picks:
-            t_pose, data_pose = picks["vive_tracker"]
-            sample["pose"] = data_pose
-            sample["pose_t"] = float(t_pose)
-
-        if "vive_ultimate" in picks:
-            t_u, data_u = picks["vive_ultimate"]
-            sample["ultimate_pose"] = data_u
-            sample["ultimate_pose_t"] = float(t_u)
-
-        if "franka_ee_pose" in picks:
-            t_franka_pose, data_franka_pose = picks["franka_ee_pose"]
-            sample["franka_ee_pose"] = data_franka_pose
-            sample["franka_ee_pose_t"] = float(t_franka_pose)
-
-        if "franka_ee_pose_cmd" in picks:
-            t_franka_pose_cmd, data_franka_pose_cmd = picks["franka_ee_pose_cmd"]
-            sample["franka_ee_pose_cmd"] = data_franka_pose_cmd
-            sample["franka_ee_pose_cmd_t"] = float(t_franka_pose_cmd)
-
-        if "tactile_sensor" in picks:
-            t_tact, data_tact = picks["tactile_sensor"]
-            sample["tactile"] = data_tact
-            sample["tactile_t"] = float(t_tact)
-        # LUCID camera data
-        if "lucid_rgb" in picks:
-            t_l, data_l = picks["lucid_rgb"]
-            sample["lucid_rgb"] = data_l
-            sample["lucid_rgb_t"] = float(t_l)
+        self._assign_pick(sample, picks, "realsense_rgb", "rgb", "rgb_t")
+        self._assign_pick(sample, picks, "realsense_rgb2", "rgb2", "rgb2_t")
+        self._assign_pick(sample, picks, "vive_tracker", "pose", "pose_t", "pose_frame_id")
+        self._assign_pick(
+            sample,
+            picks,
+            "vive_ultimate",
+            "ultimate_pose",
+            "ultimate_pose_t",
+            "ultimate_pose_frame_id",
+        )
+        self._assign_pick(sample, picks, "franka_ee_pose", "franka_ee_pose", "franka_ee_pose_t")
+        self._assign_pick(
+            sample,
+            picks,
+            "franka_ee_pose_cmd",
+            "franka_ee_pose_cmd",
+            "franka_ee_pose_cmd_t",
+            "franka_ee_pose_cmd_frame_id",
+        )
+        self._assign_pick(
+            sample,
+            picks,
+            "franka_gripper_width",
+            "franka_gripper_width",
+            "franka_gripper_width_t",
+        )
+        self._assign_pick(
+            sample,
+            picks,
+            "franka_gripper_grasp",
+            "franka_gripper_grasp",
+            "franka_gripper_grasp_t",
+        )
+        self._assign_pick(sample, picks, "tactile_sensor", "tactile", "tactile_t")
+        self._assign_pick(sample, picks, "lucid_rgb", "lucid_rgb", "lucid_rgb_t")
 
         if self.on_sample:
             self.on_sample(sample)
@@ -402,12 +487,54 @@ class EpisodeRecorder:
         self._reset_buffers()
         self.recording = False
         self.out_dir = out_dir
+        self.gripper_log_period_sec = 0.5
+        self._last_gripper_log_time = 0.0
+        self._warned_pose_frame_changes = set()
+        self._pose_frame_values = collections.defaultdict(set)
 
     def _reset_buffers(self):
         self.samples = []
 
     def _on_sample(self, sample):
         self.samples.append(sample)
+        self._track_pose_frames(sample)
+        self._maybe_log_gripper(sample)
+
+    def _track_pose_frames(self, sample):
+        frame_keys = (
+            "pose_frame_id",
+            "ultimate_pose_frame_id",
+            "franka_ee_pose_cmd_frame_id",
+        )
+        for key in frame_keys:
+            frame_id = str(sample.get(key, "")).strip()
+            if not frame_id:
+                continue
+            seen = self._pose_frame_values[key]
+            seen.add(frame_id)
+            if len(seen) > 1 and key not in self._warned_pose_frame_changes:
+                self._warned_pose_frame_changes.add(key)
+                self.node.get_logger().warn(
+                    f"[recording] {key} changed within one episode: {sorted(seen)}"
+                )
+
+    def _maybe_log_gripper(self, sample):
+        width = sample.get("franka_gripper_width")
+        grasp = sample.get("franka_gripper_grasp")
+        if width is None and grasp is None:
+            return
+
+        now = time.monotonic()
+        if now - self._last_gripper_log_time < self.gripper_log_period_sec:
+            return
+        self._last_gripper_log_time = now
+
+        parts = []
+        if width is not None:
+            parts.append(f"width={float(width):.4f}")
+        if grasp is not None:
+            parts.append(f"grasp={bool(grasp)}")
+        self.node.get_logger().info(f"[recording] gripper {' '.join(parts)}")
 
     def start(self):
         if self.recording:
@@ -415,6 +542,9 @@ class EpisodeRecorder:
         self.recording = True
         self.episode_id = time.strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
         self._reset_buffers()
+        self._last_gripper_log_time = 0.0
+        self._warned_pose_frame_changes.clear()
+        self._pose_frame_values.clear()
         self.agg.start()
         return True, f"Started episode {self.episode_id}"
 
@@ -439,12 +569,19 @@ class EpisodeRecorder:
         tactile_t_list = []
         pose_list = []
         pose_t_list = []
+        pose_frame_id_list = []
         ultimate_pose_list = []
         ultimate_pose_t_list = []
+        ultimate_pose_frame_id_list = []
         franka_ee_pose_list = []
         franka_ee_pose_t_list = []
         franka_ee_pose_cmd_list = []
         franka_ee_pose_cmd_t_list = []
+        franka_ee_pose_cmd_frame_id_list = []
+        franka_gripper_width_list = []
+        franka_gripper_width_t_list = []
+        franka_gripper_grasp_list = []
+        franka_gripper_grasp_t_list = []
         lucid_rgb_list = []
         lucid_rgb_t_list = []
 
@@ -467,10 +604,12 @@ class EpisodeRecorder:
             if "pose" in s:
                 pose_list.append(s["pose"])
                 pose_t_list.append(s.get("pose_t", np.nan))
+                pose_frame_id_list.append(str(s.get("pose_frame_id", "")))
 
             if "ultimate_pose" in s:
                 ultimate_pose_list.append(s["ultimate_pose"])
                 ultimate_pose_t_list.append(s.get("ultimate_pose_t", np.nan))
+                ultimate_pose_frame_id_list.append(str(s.get("ultimate_pose_frame_id", "")))
 
             if "franka_ee_pose" in s:
                 franka_ee_pose_list.append(s["franka_ee_pose"])
@@ -479,6 +618,17 @@ class EpisodeRecorder:
             if "franka_ee_pose_cmd" in s:
                 franka_ee_pose_cmd_list.append(s["franka_ee_pose_cmd"])
                 franka_ee_pose_cmd_t_list.append(s.get("franka_ee_pose_cmd_t", np.nan))
+                franka_ee_pose_cmd_frame_id_list.append(
+                    str(s.get("franka_ee_pose_cmd_frame_id", ""))
+                )
+
+            if "franka_gripper_width" in s:
+                franka_gripper_width_list.append(s["franka_gripper_width"])
+                franka_gripper_width_t_list.append(s.get("franka_gripper_width_t", np.nan))
+
+            if "franka_gripper_grasp" in s:
+                franka_gripper_grasp_list.append(s["franka_gripper_grasp"])
+                franka_gripper_grasp_t_list.append(s.get("franka_gripper_grasp_t", np.nan))
 
             if "lucid_rgb" in s:
                 lucid_rgb_list.append(s["lucid_rgb"])
@@ -517,12 +667,14 @@ class EpisodeRecorder:
             pose_t_arr = np.array(pose_t_list, dtype=np.float64)
             arrays["pose_t"] = pose_t_arr
             arrays["pose_dt"] = pose_t_arr - t_ref_arr
+            arrays["pose_frame_id"] = np.array(pose_frame_id_list, dtype=np.str_)
 
         if ultimate_pose_list:
             arrays["ultimate_pose"] = np.array(ultimate_pose_list, dtype=np.float32)
             ultimate_pose_t_arr = np.array(ultimate_pose_t_list, dtype=np.float64)
             arrays["ultimate_pose_t"] = ultimate_pose_t_arr
             arrays["ultimate_pose_dt"] = ultimate_pose_t_arr - t_ref_arr
+            arrays["ultimate_pose_frame_id"] = np.array(ultimate_pose_frame_id_list, dtype=np.str_)
 
         if franka_ee_pose_list:
             arrays["franka_ee_pose"] = np.array(franka_ee_pose_list, dtype=np.float64)
@@ -535,6 +687,21 @@ class EpisodeRecorder:
             franka_ee_pose_cmd_t_arr = np.array(franka_ee_pose_cmd_t_list, dtype=np.float64)
             arrays["franka_ee_pose_cmd_t"] = franka_ee_pose_cmd_t_arr
             arrays["franka_ee_pose_cmd_dt"] = franka_ee_pose_cmd_t_arr - t_ref_arr
+            arrays["franka_ee_pose_cmd_frame_id"] = np.array(
+                franka_ee_pose_cmd_frame_id_list, dtype=np.str_
+            )
+
+        if franka_gripper_width_list:
+            arrays["franka_gripper_width"] = np.array(franka_gripper_width_list, dtype=np.float64)
+            franka_gripper_width_t_arr = np.array(franka_gripper_width_t_list, dtype=np.float64)
+            arrays["franka_gripper_width_t"] = franka_gripper_width_t_arr
+            arrays["franka_gripper_width_dt"] = franka_gripper_width_t_arr - t_ref_arr
+
+        if franka_gripper_grasp_list:
+            arrays["franka_gripper_grasp"] = np.array(franka_gripper_grasp_list, dtype=np.bool_)
+            franka_gripper_grasp_t_arr = np.array(franka_gripper_grasp_t_list, dtype=np.float64)
+            arrays["franka_gripper_grasp_t"] = franka_gripper_grasp_t_arr
+            arrays["franka_gripper_grasp_dt"] = franka_gripper_grasp_t_arr - t_ref_arr
 
         if lucid_rgb_list:
             arrays["lucid_rgb"] = np.array(lucid_rgb_list, dtype=object)
@@ -548,6 +715,13 @@ class EpisodeRecorder:
             "keys": list(arrays.keys()),
             "save_format": self.save_format,
             "task_name": self.task_name,
+            "pose_frame_ids": sorted(v for v in self._pose_frame_values["pose_frame_id"] if v),
+            "ultimate_pose_frame_ids": sorted(
+                v for v in self._pose_frame_values["ultimate_pose_frame_id"] if v
+            ),
+            "franka_ee_pose_cmd_frame_ids": sorted(
+                v for v in self._pose_frame_values["franka_ee_pose_cmd_frame_id"] if v
+            ),
         }
 
         payload = {
@@ -581,9 +755,9 @@ class DataRecorderNode(Node):
         self.declare_parameter('slop_sec', 0.10)
         self.declare_parameter('enable_rgb', True)
         self.declare_parameter('enable_rgb2', False)
-        self.declare_parameter('enable_vive', True)
-        self.declare_parameter('enable_vive_ultimate', True)
-        self.declare_parameter('enable_tactile', True)
+        self.declare_parameter('enable_vive', False)
+        self.declare_parameter('enable_vive_ultimate', False)
+        self.declare_parameter('enable_tactile', False)
         self.declare_parameter('rgb_topic', '/camera_up/color/image_rect_raw')
         self.declare_parameter('rgb2_topic', '/camera_down/color/image_rect_raw')
         self.declare_parameter('rgb_resize_width', 0)
@@ -595,8 +769,12 @@ class DataRecorderNode(Node):
         self.declare_parameter('vive_ultimate_topic', '/vive_ultimate_tracker/pose')
         self.declare_parameter('enable_franka_ee_pose', False)
         self.declare_parameter('enable_franka_ee_pose_cmd', False)
+        self.declare_parameter('enable_franka_gripper_width', False)
+        self.declare_parameter('enable_franka_gripper_grasp', False)
         self.declare_parameter('franka_ee_pose_topic', '/frankaRight/ee_pose')
         self.declare_parameter('franka_ee_pose_cmd_topic', '/frankaRight/ee_pose_cmd')
+        self.declare_parameter('franka_gripper_width_topic', '/frankaRight/gripper_width')
+        self.declare_parameter('franka_gripper_grasp_topic', '/frankaRight/is_grasped')
         # ---- LUCID camera parameters ----
         self.declare_parameter('enable_lucid', False)
         self.declare_parameter('lucid_topic', '/rgb_lucid')
@@ -629,8 +807,12 @@ class DataRecorderNode(Node):
         tactile_topic = self.get_parameter('tactile_topic').value
         enable_franka_ee_pose = self.get_parameter('enable_franka_ee_pose').value
         enable_franka_ee_pose_cmd = self.get_parameter('enable_franka_ee_pose_cmd').value
+        enable_franka_gripper_width = self.get_parameter('enable_franka_gripper_width').value
+        enable_franka_gripper_grasp = self.get_parameter('enable_franka_gripper_grasp').value
         franka_ee_pose_topic = self.get_parameter('franka_ee_pose_topic').value
         franka_ee_pose_cmd_topic = self.get_parameter('franka_ee_pose_cmd_topic').value
+        franka_gripper_width_topic = self.get_parameter('franka_gripper_width_topic').value
+        franka_gripper_grasp_topic = self.get_parameter('franka_gripper_grasp_topic').value
         # LUCID camera topics
         enable_lucid = self.get_parameter('enable_lucid').value
         lucid_topic  = self.get_parameter('lucid_topic').value
@@ -661,11 +843,19 @@ class DataRecorderNode(Node):
             self.workers["tactile_sensor"] = TactileSensorRecorder(self, tactile_topic)
         if enable_franka_ee_pose:
             self.workers["franka_ee_pose"] = Float64ArrayRecorder(
-                self, franka_ee_pose_topic, "FrankaEEPose"
+                self, franka_ee_pose_topic, "FrankaEEPose", valid_sizes=(7, 16)
             )
         if enable_franka_ee_pose_cmd:
-            self.workers["franka_ee_pose_cmd"] = Float64ArrayRecorder(
+            self.workers["franka_ee_pose_cmd"] = PoseStampedRecorder(
                 self, franka_ee_pose_cmd_topic, "FrankaEEPoseCmd"
+            )
+        if enable_franka_gripper_width:
+            self.workers["franka_gripper_width"] = Float64Recorder(
+                self, franka_gripper_width_topic, "FrankaGripperWidth"
+            )
+        if enable_franka_gripper_grasp:
+            self.workers["franka_gripper_grasp"] = BoolRecorder(
+                self, franka_gripper_grasp_topic, "FrankaGripperGrasp"
             )
         # ---- LUCID camera workers ----
         if enable_lucid:
