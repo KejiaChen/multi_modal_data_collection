@@ -16,6 +16,7 @@ colcon-common-extensions = ">=0.3,<0.4"
 pytest = ">=8,<9"
 setuptools = ">=70,<80"
 pip = ">=24,<26"
+huggingface_hub = ">=0.25.0,<2"
 
 [tasks]
 ros-shell = { cmd = "bash scripts/pixi_ros_env.sh", description = "Open a shell with Pixi plus ROS Humble sourced." }
@@ -23,3 +24,4 @@ build = { cmd = "bash scripts/pixi_ros_env.sh bash -lc 'cd \"$WORKSPACE_ROOT\" &
 check-python = { cmd = "bash scripts/pixi_ros_env.sh python -c \"import cv2, datasets, numpy, pyarrow, serial; print('Pixi Python deps are available.')\"", description = "Verify the Python dependencies managed by Pixi." }
 convert-npz-help = { cmd = "bash scripts/pixi_ros_env.sh python scripts/convert_npz_to_lerobot_v21.py --help", description = "Show the bundled NPZ-to-LeRobot conversion script help." }
 launch-recorder = { cmd = "bash scripts/pixi_ros_env.sh ros2 launch multi_modal_data_collection record_multimodal_with_timestamps.launch.py", description = "Launch the timestamped recorder with ROS and Pixi active." }
+upload-hf = { cmd = "bash scripts/pixi_ros_env.sh python scripts/upload_recordings_to_hf.py", description = "Upload a local recordings folder to a Hugging Face dataset repo." }
