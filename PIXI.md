@@ -1,6 +1,6 @@
 # Pixi Workflow Notes
 
-This package includes a local `pixi.toml`, but in this repository the recommended workflow is to use the workspace from:
+This package includes a local `pixi.toml`, and in this repository the recommended workflow is to invoke it from:
 
 - `/home/tp2/ws_humble_policy`
 
@@ -9,24 +9,22 @@ That is the main setup when working with:
 - `multi_modal_data_collection`
 - `realsense-ros`
 
-## Environment
-
-If needed, export the ROS discovery server before launching ROS nodes:
-
-```bash
-export ROS_DISCOVERY_SERVER=10.157.175.222:11811
-```
-
 ## Recommended Setup
 
-Use the workspace root rather than the package directory:
+Use the workspace root while pointing `pixi` at the package manifest:
 
 ```bash
 cd /home/tp2/ws_humble_policy
 export PATH="$HOME/.pixi/bin:$PATH"
-pixi install
-pixi run build
-pixi run ros-shell
+pixi run -m src/multi_modal_data_collection/pixi.toml ros-shell
+```
+All the following commands with ros2 should run in this ros-shell.
+
+If you need to rebuild, exit the ros-shell and
+```bash
+# you are in ~/ws_humble_policy
+pixi install -m src/multi_modal_data_collection/pixi.toml
+pixi run -m src/multi_modal_data_collection/pixi.toml build
 ```
 
 ## Launch RealSense
@@ -34,7 +32,7 @@ pixi run ros-shell
 ### Single camera
 
 ```bash
-pixi run ros2 launch realsense2_camera rs_launch.py \
+pixi run -m src/multi_modal_data_collection/pixi.toml ros2 launch realsense2_camera rs_launch.py \
   rgb_camera.color_profile:=640x480x30 \
   depth_module.depth_profile:=640x480x30
 ```
@@ -60,8 +58,6 @@ pixi run ros2 launch realsense2_camera rs_multi_camera_launch.py \
 ```
 
 ## Start Recording
-
-
 Start the footswitch trigger:
 
 ```bash
@@ -90,6 +86,7 @@ pixi run ros2 launch multi_modal_data_collection record_multimodal_with_timestam
   task_name:=pnp_microwave \
   robot_type:=franka
 ```
+After that, start control on the robot PC.
 
 
 ## Visualize a Dataset
